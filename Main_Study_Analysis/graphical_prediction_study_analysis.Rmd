@@ -1,0 +1,1300 @@
+---
+title: "Predictive distribution study analyses"
+output: 
+  html_document:
+    toc: true
+---
+
+# Set up
+
+## How to compile this file
+
+We recommend loading this repository as a new project in RStudio (File -> New Project -> Existing directory and choosing `[your-path]/supplemental_material/`). Then, you can run code chunks individually or "Knit" the entire markdown file. RStudio should handle working directories for you.
+
+If you choose to compile the file manually, make sure te Rmd working directory is same directory that contains this file (use 'getwd()'). The path should look like `[your-path]/supplemental_material/Main_Study_Analysis/`. Use 'setwd()' if not.
+
+## Libraries required for this analysis
+
+Some of the libraries below are not on CRAN (rethinking) or require particular installation instructions (rstan). See comments in the code chunk below.
+
+The `import` library is also required to run this code, which can be installed via `install.packages("import")`.
+
+```{r setup, warning = FALSE, message = FALSE}
+library(reshape)
+library(dplyr)
+import::from(plyr, ddply)
+library(magrittr)   #pipe syntax (%>%, %<>%, etc)
+library(ggplot2)
+library(ggstance)   #horizontal geoms (geom_violinh)
+import::from(gamlss, gamlss)
+import::from(gamlss.dist, dTF, qTF, pTF, rTF)   #the TF functions are a scaled and shifted t distribution
+
+# for RStan installation instructions, see https://github.com/stan-dev/rstan/wiki/RStan-Getting-Started
+# DO NOT attempt to install rstan using install.packages(), as it will likely fail. Unfortunately its
+# installation is finicky, and we recommend following the instructions on that page to the letter.
+library(rstan)
+
+# install via devtools::install_github("rmcelreath/rethinking")
+library(rethinking)
+
+library(forcats)
+library(brms)
+library(lme4)
+import::from(tidyr, gather)
+```
+
+## Ggplot theme + stan options
+
+```{r}
+theme_set(theme_bw())
+options(mc.cores = parallel::detectCores())
+```
+
+# Read in data
+
+## Text responses and demographics data
+
+```{r}
+#results are split in multiple files 
+
+df <- read.csv("anonymized_ev_dist_forR_merged.txt", sep="\t") #
+table(df$tasktype)
+ads <- df
+ads <- subset(ads, ads$tasktype != "") #omit blank lines
+
+```
+
+
+## KL results
+
+```{r}
+df2 <- read.csv("anonymized_study2_response_dists_forR_merged.txt", sep="\t") 
+df2 <- subset(df2, df2$condition!="")
+
+#create subsets for computing kld against correct reference distribution for discrete or continuous
+df2cr <- subset(df2, df2$task == "recall" & (df2$condition=="c_p" | df2$condition=="c_np" | df2$condition=="rc_np"))
+df2dr <- subset(df2, df2$task == "recall" & (df2$condition=="d_p" | df2$condition=="d_np" | df2$condition=="rd_np"))
+df2cp <- subset(df2, df2$task == "predict" & (df2$condition=="c_p" | df2$condition=="c_np" | df2$condition=="rc_np"))
+df2dp <- subset(df2, df2$task == "predict" & (df2$condition=="d_p" | df2$condition=="d_np" | df2$condition=="rd_np"))
+
+```
+
+### Calculate mean and sd for recall and predict dists
+
+#### For discrete
+
+```{r}
+true_mean = 250
+true_sd = 150/sqrt(40)
+means <- vector() 
+sds <- vector()
+merrs <- vector()
+serrs <- vector()
+amerrs <- vector()
+aserrs <- vector()
+for(i in 1:length(df2dr$dist_vals)){
+  balls = strsplit(as.character(df2dr$dist_vals[i]), "_") 
+  balls = as.numeric(balls[[1]])
+  merr = true_mean - mean(balls)
+  serr = true_sd - sd(balls)
+  amerr = abs(true_mean - mean(balls))
+  aserr = abs(true_sd - sd(balls))
+  means = append(means, mean(balls))
+  sds = append(sds, sd(balls))
+  merrs = append(merrs, merr)
+  serrs = append(serrs, serr)
+  amerrs = append(amerrs, amerr)
+  aserrs = append(aserrs, aserr)
+}
+df2dr = cbind(df2dr, means, merrs, sds, serrs, amerrs, aserrs)
+
+true_mean = 0.7
+true_sd = 1.1/sqrt(8)
+means <- vector() 
+sds <- vector()
+merrs <- vector()
+serrs <- vector()
+amerrs <- vector()
+aserrs <- vector()
+for(i in 1:length(df2dp$dist_vals)){
+  balls = strsplit(as.character(df2dp$dist_vals[i]), "_") 
+  balls = as.numeric(balls[[1]])
+  merr = true_mean - mean(balls)
+  serr = true_sd - sd(balls)
+  amerr = abs(true_mean - mean(balls))
+  aserr = abs(true_sd - sd(balls))
+  means = append(means, mean(balls))
+  sds = append(sds, sd(balls))
+  merrs = append(merrs, merr)
+  serrs = append(serrs, serr)
+  amerrs = append(amerrs, amerr)
+  aserrs = append(aserrs, aserr)
+}
+df2dp = cbind(df2dp, means, merrs, sds, serrs, amerrs, aserrs)
+```
+
+#### For continuous
+
+```{r}
+true_mean = 250
+true_sd = 150/sqrt(40)
+means <- vector() 
+sds <- vector()
+merrs <- vector()
+serrs <- vector()
+amerrs <- vector()
+aserrs <- vector()
+for(i in 1:length(df2cr$dist_vals)){
+  estimated_y = strsplit(as.character(df2cr$binprob[i]), ",") 
+  estimated_y = as.numeric(estimated_y[[1]])
+  myx = strsplit(as.character(df2cr$binx[i]), "_")
+  myx = as.numeric(myx[[1]])
+  sum = 0
+  new_est_y <- vector()
+  for(j in 1:length(estimated_y)){ #for each thing in estimated_y, if not 12 add to sum
+    if(estimated_y[j]>12){
+      sum=sum+estimated_y[j]
+      new_est_y = append(new_est_y, estimated_y[j])
+    }else{
+      new_est_y = append(new_est_y, 0)
+    }
+  }
+  increment=100/sum
+  increment = increment/5
+  dist_vals <- vector()
+  for(j in 1:length(new_est_y)){
+    if(new_est_y[j]!=0){
+      nballs = new_est_y[j]*increment
+      nballs = round(nballs, digits=0)
+      for(k in 1:nballs){
+        dist_vals = append(dist_vals, myx[j])
+      }
+    }
+  }
+  amerr = abs(true_mean - mean(dist_vals))
+  aserr = abs(true_sd - sd(dist_vals))
+  merr = true_mean - mean(dist_vals)
+  serr = true_sd - sd(dist_vals)
+  means = append(means, mean(dist_vals))
+  sds = append(sds, sd(dist_vals))
+  merrs = append(merrs, merr)
+  serrs = append(serrs, serr)
+  amerrs = append(amerrs, amerr)
+  aserrs = append(aserrs, aserr)
+}
+df2cr = cbind(df2cr, means, merrs, sds, serrs, amerrs, aserrs)
+
+
+true_mean = 0.7
+true_sd = 1.1/sqrt(8)
+means <- vector() 
+sds <- vector()
+merrs <- vector()
+serrs <- vector()
+amerrs <- vector()
+aserrs <- vector()
+for(i in 1:length(df2cp$dist_vals)){
+  estimated_y = strsplit(as.character(df2cp$binprob[i]), ",") 
+  estimated_y = as.numeric(estimated_y[[1]])
+  myx = strsplit(as.character(df2cp$binx[i]), "_")
+  myx = as.numeric(myx[[1]])
+  sum = 0
+  new_est_y <- vector()
+  for(j in 1:length(estimated_y)){ #for each thing in estimated_y, if not 12 add to sum
+    if(estimated_y[j]>12){
+      sum=sum+estimated_y[j]
+      new_est_y = append(new_est_y, estimated_y[j])
+    }else{
+      new_est_y = append(new_est_y, 0)
+    }
+  }
+  increment=100/sum
+  increment = increment/5
+  dist_vals <- vector()
+  for(j in 1:length(new_est_y)){
+    if(new_est_y[j]!=0){
+      nballs = new_est_y[j]*increment
+      nballs = round(nballs, digits=0)
+      for(k in 1:nballs){
+        dist_vals = append(dist_vals, myx[j])
+      }
+    }
+  }
+  merr = true_mean - mean(dist_vals)
+  serr = true_sd - sd(dist_vals)
+  amerr = abs(true_mean - mean(dist_vals))
+  aserr = abs(true_sd - sd(dist_vals))
+  means = append(means, mean(dist_vals))
+  sds = append(sds, sd(dist_vals))
+  merrs = append(merrs, merr)
+  serrs = append(serrs, serr)
+  amerrs = append(amerrs, amerr)
+  aserrs = append(aserrs, aserr)
+}
+df2cp = cbind(df2cp, means, merrs, sds, serrs, amerrs, aserrs)
+```
+
+Join discrete and continuous together
+
+```{r}
+df2 <- rbind(df2dp, df2cp, df2dr, df2cr) 
+```
+
+## Long format text probability questions results
+
+```{r}
+adsL <- data.frame(read.csv("./anonymized_ev_dist_forR_long_merged.txt", sep="\t", header=TRUE))
+adsL <- subset(adsL, adsL$tasktype!="")
+
+#prepare variables
+adsL$erra <- abs(adsL$err)
+adsL$discrete <- ifelse(adsL$tasktype=="d_p" | adsL$tasktype=="d_np" | adsL$tasktype=="r_np", 1, 0)
+adsL$predict <- ifelse(adsL$tasktype=="d_p" | adsL$tasktype=="c_p", 1, 0)
+adsL$rules <- ifelse(adsL$tasktype=="rc_np", 1, ifelse(adsL$tasktype=="rd_np", 1, 0))
+
+```
+
+### checking completion time and pretest score
+
+```{r}
+mean(ads$totaltime, na.rm=TRUE)
+sd(ads$totaltime, na.rm=TRUE)
+
+ddply(ads, ~tasktype, summarise, mean=mean(totaltime, na.rm=TRUE), sd=sd(totaltime, na.rm=TRUE))
+summary(aov(totaltime~tasktype, data=ads))
+
+ggplot(ads, aes(tasktype, totaltime)) + geom_boxplot() + geom_jitter()
+
+#pretest score
+ddply(ads, ~tasktype, summarise, mean=mean(prescore, na.rm=TRUE), sd=sd(prescore, na.rm=TRUE))
+summary(aov(prescore~tasktype, data=ads)) #make sure there are no noticeable differences messing up randomization
+```
+
+
+# Recall task analysis (KL divergence)
+
+## Set up for calculating KL
+
+### Reference distributions: Discrete normal dist for a fixed interval size
+
+To calculate KL divergence, we will use a discretized normal distribution. First, we'll derive that discrete reference distribution that we will use to calculate KLD. This will be the true sampling distribution (see paper for the terminology we are using to describe each distribution).
+
+```{r}
+#for recall
+recall_n = 40
+recall_true_mu = 250
+recall_true_sd = 150
+recall_true_se = recall_true_sd/sqrt(recall_n)
+
+min_x = 0
+max_x = 500
+interval_size = 50
+
+#derive discrete reference distribution
+make_discrete_reference_dist = function(dist_fun, min_x, max_x, interval_size) {
+  data_frame(
+    x_min = seq(min_x, max_x - interval_size, by = interval_size),
+    x_max = seq(min_x + interval_size, max_x, by = interval_size),
+    x = (x_min + x_max)/2,   #midpoint of the interval
+    #this difference sometimes comes out as 0 due to rounding errors in bins with very low probability
+    #adjust it to always be at least xmin (smallest value > 0 on this machine).
+    p = pmax(.Machine$double.xmin, dist_fun(x_max) - dist_fun(x_min))
+    # p = dist_fun(x_max) - dist_fun(x_min)
+  )
+}
+
+recall_true_sampling_ref_dist= make_discrete_reference_dist(
+  function(x) pnorm(x, recall_true_mu, recall_true_se), 
+  min_x, max_x, interval_size
+)
+recall_true_sampling_ref_dist
+```
+
+Let's make sure the reference distribution looks right:
+
+```{r}
+recall_true_sampling_ref_dist %>%
+    ggplot(aes(x = x, y = p)) +
+    stat_function(fun = function(x) dnorm(x, recall_true_mu, recall_true_se) * interval_size, n = 1001) +
+    geom_segment(aes(xend = x, y = 0, yend = p), size = 2)
+```
+
+We could also make comparisons to other reference distributions for predictions based on the sample shown to participants. That sample had these properties:
+
+```{r}
+recall_sample_mu = 268
+recall_sample_sd = 151
+recall_sample_se = recall_sample_sd/sqrt(recall_n)
+
+recall_nu = recall_n - 1      #degrees of freedom
+```
+
+Here is a plot of some possible distributions to compare against:
+
+```{r}
+recall_true_sampling_ref_dist %>%
+  ggplot(aes(x = x, y = p)) +
+  # predictive dist - Leek
+  stat_function(fun = function(x) dnorm(x, recall_sample_mu, sqrt(2)*recall_sample_se) * interval_size, 
+    color="#0066ff", linetype = "dotdash", size=1.2) +
+  # predictive dist - Spence
+  stat_function(fun = function(x) dTF(x, recall_sample_mu, sqrt(2)*recall_sample_se, recall_nu) * interval_size, 
+    color="purple", linetype="dashed", size=1.2) +
+  #true sampling dist
+  stat_function(fun = function(x) dnorm(x, recall_true_mu, recall_true_se) * interval_size, 
+    size=1.2) +
+  #observed sampling dist
+  stat_function(fun = function(x) dnorm(x, recall_sample_mu, recall_sample_se) * interval_size,
+    color="#ff6699", linetype = 2, size=1.2) + 
+  #observed population dist
+  stat_function(fun = function(x) dnorm(x, recall_sample_mu, recall_sample_sd) * interval_size, 
+    color="orange", linetype = "dotdash", size=1.2) +
+  theme(axis.text=element_text(size=18), 
+    # axis.text.y=element_blank(), 
+    panel.grid.major = element_blank(), panel.grid.minor = element_blank()) 
+```
+
+For this experiment, the Leek (blue) and Spence (purple) predictive dists are essentially equivalent. We are comparing against the true sampling distribution (black) because that is what participants saw after their prediction.
+
+### Discrete KLD calculation (method 1)
+
+Now let's make a function that takes a reference distribution as returned by `make_reference_dist` and a vector of discrete guesses on the same bins and returns the KLD. 
+
+```{r}
+kld_discrete = function(reference_dist, guesses) {
+  #responses with 20 balls appear to be recorded as being out of 100, so
+  #instead of assuming some number here we'll just make this out of the
+  #total of the supplied guesses 
+  guesses = guesses / sum(guesses) 
+  smoothing_denominator = 1000
+  n_atoms = nrow(recall_true_sampling_ref_dist)
+  
+  #make sure the number of supplied guesses is the same as the atoms in the reference dist
+  stopifnot(n_atoms == length(guesses))
+  
+  #calculate smoothed guesses (guaranteed to have no 0s and sum to 1)
+  estimated_p = (guesses * smoothing_denominator + 1) / (smoothing_denominator + n_atoms)
+
+  #assert we have normalized everything correctly (within a reasonable tolerance)
+  stopifnot(isTRUE(all.equal(sum(reference_dist$p), 1, tolerance = 0.01)))
+  stopifnot(isTRUE(all.equal(sum(estimated_p), 1, tolerance = 0.01)))
+  
+  #since we have normalized everything correctly, we can use the KLD formula directly
+  #instead of calling KLD (which renormalizes again)
+  sum(reference_dist$p * (log(reference_dist$p) - log(estimated_p)))
+}
+```
+
+**Method 1**: Use smoothing to eliminate non-zeros (see [here](https://mathoverflow.net/q/72672)) and compare against discretization normal dist.
+
+```{r}
+df2dr$kl_disc = apply(df2dr, 1, function(row) {
+  guesses = as.numeric(strsplit(as.character(row["binprob"]), ",")[[1]])
+  kld_discrete(recall_true_sampling_ref_dist, guesses)
+})
+```
+
+#### Alternative approach to KLD (methods 2 and 3)
+
+Here we'll use code based on a simplified version of `LaplacesDemon::KLD` that does not try to guess if it is given `log(p)` or `p` (that guessing introduces bugs in the case of 0s). We've also changed the syntax to match https://en.wikipedia.org/wiki/Kullback–Leibler_divergence. To quote that article, KL divergence is "the amount of information lost when Q is used to approximate P."
+
+Here, $P$ is the distribution we're trying to elicit and $Q$ is the participant's approximation to it.
+
+$$ 
+\begin{eqnarray}
+kld(p, q) & = & D_{KL}(P || Q)\\
+          & = & \sum_i P(i) log \frac{P(i)}{Q(i)}\\
+          & = & \sum_i P(i)[log(P(i)) - log(Q(i))]
+\end{eqnarray}
+$$
+In case of zeros, we'll replace them with `0.000001`. Implicitly, this ends up being a smoothing parameter as well, just of a different sort.
+
+```{r}
+kld = function(p, q) {
+  stopifnot(identical(length(q), length(p)))
+  stopifnot(all(is.finite(q)) && all(is.finite(p)))
+  stopifnot(all(p > 0))   #ref dists will not have 0s
+  q[which(q == 0)] <- .000001
+  q <- q/sum(q)
+  p <- p/sum(p)
+  sum(p * (log(p) - log(q)))
+}
+```
+
+**Method 2:** Replace zeros with `0.000001` and compare against discretized normal dist.
+
+```{r}
+df2dr$kl_disc_zeros = apply(df2dr, 1, function(row) {
+  guesses = as.numeric(strsplit(as.character(row["binprob"]), ",")[[1]])
+  kld(recall_true_sampling_ref_dist$p, guesses/sum(guesses))
+})
+```
+
+**Method 3:** Replace zeros with `0.000001` and compare against density of continuous normal dist.
+
+```{r}
+df2dr$kl_cont_zeros = apply(df2dr, 1, function(row) {
+  guesses = as.numeric(strsplit(as.character(row["binprob"]), ",")[[1]])
+  kld(dnorm(recall_true_sampling_ref_dist$x, recall_true_mu, recall_true_se), guesses/sum(guesses))
+})
+```
+
+#### Comparing the three approaches
+
+Method 1 versus method 2 (black line is y = x):
+
+```{r}
+df2dr %>%
+  ggplot(aes(x = log(kl_disc), y = log(kl_disc_zeros))) +
+  geom_point(position=position_jitter(width=.01, height=.01), alpha=.1, pch=19, size=2) +
+  geom_abline(intercept = 0, slope = 1) +
+  facet_wrap(~ condition)
+```
+
+Method 1 verus method 3:
+
+```{r}
+df2dr %>%
+  ggplot(aes(x = log(kl_disc), y = log(kl_cont_zeros))) +
+  geom_point(alpha=.1, pch=19, size=2) +
+  geom_abline(intercept = 0, slope = 1) +
+  facet_wrap(~ condition)
+```
+
+As expected, comparing the discrete distribution against the continuous version adds some upward bias (likely due to underestimating the probability close to the mode and overestimating tails; see [continuity correction](https://en.wikipedia.org/wiki/Continuity_correction)).
+
+The larger differences are due to differences in how to handle zeros when calculating KL divergence. We have not come across a clearly better method (the first method uses smoothing that requires a choice of smoothing parameter, the second may disadvantage the continuous condition, and the third may disadvantage the discrete condition). Instead we will examine all three.
+
+### Continuous KLD
+
+For our first approach, we'll convert the input curves into continuous functions and then take the
+area under the curve in each reference bin, then compare against the discretized normal dist.
+
+Given the guessed x and y values, we use spline fitting to convert these into a function (which is appropriate
+here because spline fitting was also used in the visual feedback as people *input* these functions).
+
+Say we had a pretty good guess (actual in black, guess in red):
+
+```{r}
+guessed_x = c(25, 75, 125, 195, 245, 255, 305, 375, 425, 475)
+guessed_y = dnorm(guessed_x, recall_true_mu, recall_true_se)
+guessed_y = c(0, 0, 0.00001, 0.001, 0.016, 0.016, 0.001, 0.00001, 0, 0)
+guessed_fun = splinefun(guessed_x, guessed_y, "monoH.FC")
+guessed_fun_gt0 = function(x) pmax(guessed_fun(x), 0)
+
+recall_true_sampling_ref_dist %>%
+  ggplot(aes(x = x, y = p)) +
+  stat_function(fun = function(x) dnorm(x, recall_true_mu, recall_true_se) * interval_size, n = 1001) +
+  geom_segment(aes(xend = x, y = 0, yend = p), size = 2) +
+  stat_function(fun = function(x) guessed_fun_gt0(x) * interval_size, color="red", n=1001)  +
+  geom_point(data = data.frame(x = guessed_x, p = guessed_y * interval_size), color="red")
+```
+
+Let's make a function that compares the areas under the curve to our discrete reference distribution areas using KLD:
+
+```{r}
+kld_continuous = function(reference_dist, guessed_x, guessed_y) {
+  guessed_fun = splinefun(guessed_x, guessed_y, "monoH.FC")
+  
+  #to be well-defined we must make sure the curve is >= 0
+  #(actually, > 0, but this is handled in kld_discrete())
+  guessed_fun_gt0 = function(x) pmax(guessed_fun(x), 0)
+  
+  #verify all x values are approximately in their bins (sometimes it is out by 1)
+  stopifnot(all(
+    reference_dist$x_min - ceiling(guessed_x) <= 1  & 
+    floor(guessed_x) - reference_dist$x_max <= 1))
+  
+  #get the area under the entire guessed curve
+  area_under_curve = integrate(guessed_fun_gt0, min(reference_dist$x_min), max(reference_dist$x_max))$value
+  
+  #then, for each bin defined by the reference dist, 
+  #determine the proportion of the area under the guessed curve that is in that bin
+  guesses = apply(reference_dist, 1, function(.) 
+    integrate(guessed_fun_gt0, .["x_min"], .["x_max"])$value / area_under_curve)
+  
+  kld_discrete(reference_dist, guesses)
+}
+```
+
+**Method 1:** Use spline-fitting and numerical integration to calculate the area under the curve in each bin from the discrete normal dist, and compare against the discrete normal dist.
+
+```{r}
+df2cr$kl_disc = apply(df2cr, 1, function(row) {
+  guessed_y = as.numeric(strsplit(as.character(row["binprob"]), ",")[[1]])
+  guessed_x = as.numeric(strsplit(as.character(row["binx"]), "_")[[1]])
+  kld_continuous(recall_true_sampling_ref_dist, guessed_x, guessed_y)
+})
+```
+
+**Method 2:** Normalize by max guess and replace zeros with `0.000001`, then compare against normal dist at corresponding densities.
+
+```{r}
+df2cr$kl_cont_zeros = apply(df2cr, 1, function(row) {
+  guessed_y = as.numeric(strsplit(as.character(row["binprob"]), ",")[[1]])
+  guessed_x = as.numeric(strsplit(as.character(row["binx"]), "_")[[1]])
+  kld(dnorm(guessed_x, recall_true_mu, recall_true_se), guessed_y/sum(guessed_y))
+})
+```
+
+**Method 3:** No method 3 here, but we'll match up method 2 in continuous with both method 2 and 3 of the discrete dist.
+
+```{r}
+df2cr$kl_disc_zeros = df2cr$kl_cont_zeros
+```
+
+#### Comparing the approaches
+
+```{r}
+df2cr %>%
+  ggplot(aes(x = log(kl_disc), y = log(kl_cont_zeros))) +
+  geom_point(alpha=.1, pch=19, size=2) +
+  geom_abline(intercept = 0, slope = 1) +
+  facet_wrap(~ condition)
+```
+
+It looks like the results are similar, with a slight downward bias when using the discrete method. Again, we have not come across a clearly better method (the first method is more involved, using spline-fitting and discretization with smoothing that requires a choice of smoothing parameter, the second may disadvantage discrete or continous depending on how we convert discrete into something comparable to the continuous distribution). There does appear to be systematic differences, but those differences don't appear to disadvantage any particular condition, and they aren't large relative to the variance.
+
+
+## Combine the discrete and continuous and add prescore
+
+We combine the discrete and continuous conditions into a single dataframe and add the literacy prescore.
+
+```{r}
+adfr <- rbind(df2dr, df2cr)
+
+adsL.first <- adsL[match(unique(adsL$workerId), adsL$workerId),]
+worker_prescore <- adsL.first[,c("workerId","prescore")]
+
+adfr = merge(adfr, worker_prescore, by = intersect(names(adfr), names(worker_prescore)))
+```
+
+## Some descriptive statistics
+
+Log of KLD across conditions:
+
+```{r}
+adfr %>%
+  mutate(condition = reorder(condition, log(kl_disc))) %>%
+  ggplot(aes(x = condition, y = log(kl_disc))) +
+  geom_violin(fill = "gray75") + 
+  geom_boxplot(width = 0.1, color = "red", outlier.color = NA) +
+  geom_jitter(pch=20, width = .2)
+```
+
+Discrete conditions have lower KLD for some people compared to the continuous conditions. This is consistent with our model-based results (below): sometimes lower means but higher variance.
+
+```{r}
+adfr %<>% mutate(
+  discrete = ifelse(condition == "d_p" | condition == "d_np" | condition == "r_np", 1, 0),
+  predict = ifelse(condition == "d_p" | condition == "c_p", 1, 0),
+  rules = ifelse(condition == "rd_np" | condition == "rc_np", 1, 0)
+)
+
+ddply(adfr, ~discrete, summarise, median=median(kl_cont_zeros, na.rm=TRUE), sd=sd(kl_cont_zeros, na.rm=TRUE))
+ddply(adfr, ~predict, summarise, median=median(kl_cont_zeros, na.rm=TRUE), sd=sd(kl_cont_zeros, na.rm=TRUE))
+ddply(adfr, ~rules, summarise, median=median(kl_cont_zeros, na.rm=TRUE), sd=sd(kl_cont_zeros, na.rm=TRUE))
+```
+
+
+```{r}
+#summarize error in mean and sd of recalled versus shown
+#first means
+ddply(adfr, ~condition, summarise, 
+  mean=mean(merrs, na.rm=TRUE), 
+  sd=sd(merrs, na.rm=TRUE),
+  #mean/sd won't be great summaries given the skewed distribution
+  median = median(merrs, na.rm=TRUE),
+  mad = mad(merrs, na.rm=TRUE))
+```
+
+```{r}
+#absolute differences means
+ddply(adfr, ~condition, summarise, 
+  mean=mean(amerrs, na.rm=TRUE), 
+  sd=sd(amerrs, na.rm=TRUE),
+  #mean/sd won't be great summaries given the skewed distribution
+  median = median(amerrs, na.rm=TRUE),
+  mad = mad(amerrs, na.rm=TRUE))
+```
+
+```{r}
+#sds
+ddply(adfr, ~condition, summarise, 
+  mean=mean(serrs, na.rm=TRUE), 
+  sd=sd(serrs, na.rm=TRUE),
+  #mean/sd won't be great summaries given the skewed distribution
+  median = median(serrs, na.rm=TRUE),
+  mad = mad(serrs, na.rm=TRUE))
+```
+
+```{r}
+#absolute difference sds
+ddply(adfr, ~condition, summarise, 
+  mean=mean(aserrs, na.rm=TRUE), 
+  sd=sd(aserrs, na.rm=TRUE),
+  #mean/sd won't be great summaries given the skewed distribution
+  median = median(aserrs, na.rm=TRUE),
+  mad = mad(aserrs, na.rm=TRUE))
+```
+
+```{r}
+#plot for overview of how many perfectly recalled in each condition (dots at 0 on y)
+ggplot(adfr, aes(x=reorder(condition, amerrs, FUN=median), amerrs)) + geom_boxplot() + geom_jitter()
+```
+
+```{r}
+#distribution of errors in means - recalled
+adfr %>%
+  ggplot(aes(x = means - 250)) + 
+  stat_density() +
+  facet_wrap(~condition) +
+  geom_vline(xintercept = 0, color="black") + 
+  theme(axis.text.y=element_blank(), axis.ticks.y=element_blank(), 
+    panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + 
+  labs(x="Recalled Mean - Reference Mean",  y="") + 
+  geom_vline(xintercept = 18, color="red")
+  #use red for sample sampling dist, black for pop sampling dist, blue for predictive, orange for data dist
+```
+
+```{r}
+#distribution of errors in sd - recalled
+adfr %>%
+ggplot(aes(x = sds - 150/sqrt(40))) + stat_density() +
+    facet_wrap(~condition) +
+    geom_vline(xintercept = 0, color="black") + theme(axis.text.y=element_blank(), axis.ticks.y=element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + labs(x="Recalled SD - Reference SD",  y="") + geom_vline(xintercept = 2.85, color="red") #+ geom_vline(xintercept = 144, color="orange")
+```
+
+```{r}
+#counts of how many people perfectly recalled in discrete
+by(adfr, adfr$condition, function(means) sum(means==250, na.rm=TRUE))
+```
+
+```{r}
+#by percentage
+by(adfr, adfr$condition, function(means) sum(means==250, na.rm=TRUE)/nrow(means))
+```
+
+
+## Frequentist model
+
+A model of log(kl) that accounts for different variance in different conditions:
+
+```{r}
+#first, set seed so results don't differ slightly each time from convergence process
+
+#center prescore
+adfr$prescore_c <- adfr$prescore - mean(adfr$prescore)
+
+adfr_gamlss = adfr %>%
+  #gamlss needs all columns not to have NAs
+  dplyr::select(discrete, predict, rules, prescore_c, kl_disc, kl_disc_zeros, kl_cont_zeros) 
+
+mg = gamlss(log(kl_cont_zeros) ~ discrete*predict + rules + prescore_c, 
+  sigma.formula = ~ discrete*predict + rules + prescore_c,
+  data=adfr_gamlss)
+
+summary(mg)
+```
+
+## Bayesian model
+
+An equivalent model in rethinking: (this is what we currently report)
+
+```{r}
+kld_model_spec = alist(
+  kl ~ dlnorm(mu, sigma),
+  mu <- mu_a + mu_bd*discrete + mu_bp*predict + mu_bdp*discrete*predict + mu_br*rules + mu_bpr*prescore_c,
+  log(sigma) <- sigma_a + sigma_bd*discrete + sigma_bp*predict + sigma_bdp*discrete*predict + 
+    sigma_br*rules + sigma_bpr*prescore_c,
+  mu_a ~ dnorm(0,5), #mean, sd
+  mu_bd ~ dnorm(0,5),
+  mu_bp ~ dnorm(0,5),
+  mu_bdp ~ dnorm(0,5),
+  mu_br ~ dnorm(0,5),
+  mu_bpr ~ dnorm(0,5),
+  sigma_a ~ dnorm(0,2.5),
+  sigma_bd ~ dnorm(0,2.5),
+  sigma_bp ~ dnorm(0,2.5),
+  sigma_bdp ~ dnorm(0,2.5),
+  sigma_br ~ dnorm(0,2.5),
+  sigma_bpr ~ dnorm(0,2.5)
+)
+
+m_recall_disc = map2stan(kld_model_spec, data = adfr_gamlss %>% rename(kl = kl_disc))
+m_recall_disc_zeros = map2stan(kld_model_spec, data = adfr_gamlss %>% rename(kl = kl_disc_zeros))
+m_recall_cont_zeros = map2stan(kld_model_spec, data = adfr_gamlss %>% rename(kl = kl_cont_zeros))
+```
+
+### Coefficients of mean log(KLD)
+
+First we'll derive the coefficients for mu (the mean of log(KLD)). For a sensible display order we'll use the following (we use this list later with `fct_relevel()` to make sure the coefficients are displayed in the order we want):
+
+```{r}
+coef_display_order = rev(c("intercept", "discrete", "predict", "discrete*predict", "rules", "literacy"))
+```
+
+Then we'll extract samples of the coefficients from the model and display them as raindrop plots:
+
+```{r}
+plot_kld_model_mu_coefs = function(m) {
+  mu_coefs = m %>%
+    extract.samples() %>%
+    as_data_frame() %>%
+    transmute(
+      intercept = mu_a,
+      discrete = mu_bd,
+      predict = mu_bp,
+      `discrete*predict` = mu_bdp,
+      rules = mu_br,
+      literacy = mu_bpr
+    ) %>%
+    mutate(iteration = 1:n()) %>%
+    gather(condition, estimate, -iteration) %>%
+    mutate(condition = fct_relevel(condition, coef_display_order))
+  
+  mu_coefs %>% 
+    ggplot(aes(x = estimate, y = condition)) + 
+    geom_violinh(fill = "black", color = NA) + 
+    geom_vline(xintercept = 0, color = "red") + 
+    theme(axis.text=element_text(size=18), 
+    # axis.text.y=element_blank(), 
+    panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+    labs(x = "Coefficients (mu)", y = "")
+}
+plot_kld_model_mu_coefs(m_recall_disc) + xlim(-2, 2) + ggtitle("Method 1")
+plot_kld_model_mu_coefs(m_recall_disc_zeros) + xlim(-2, 2) + ggtitle("Method 2")
+plot_kld_model_mu_coefs(m_recall_cont_zeros) + xlim(-2, 2) + ggtitle("Method 3")
+```
+
+Broadly similar estimates using each approach.
+
+### Coefficients of log(sd) of log(kld)
+
+```{r}
+plot_kld_model_sigma_coefs = function(m) {
+  sigma_coefs = m %>%
+    extract.samples() %>%
+    as_data_frame() %>%
+    transmute(
+      intercept = sigma_a,
+      discrete = sigma_bd,
+      predict = sigma_bp,
+      `discrete*predict` = sigma_bdp,
+      rules = sigma_br,
+      literacy = sigma_bpr
+    ) %>%
+    mutate(iteration = 1:n()) %>%
+    gather(condition, estimate, -iteration) %>%
+    mutate(condition = fct_relevel(condition, coef_display_order))
+  
+  sigma_coefs %>% 
+    ggplot(aes(x = estimate, y = condition)) + 
+    geom_violinh(fill = "black", color = NA) + 
+    geom_vline(xintercept = 0, color = "red") + 
+    theme(axis.text=element_text(size=18), 
+    # axis.text.y=element_blank(), 
+    panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+    labs(x = "Coefficients (sigma)", y = "")
+}
+plot_kld_model_sigma_coefs(m_recall_disc) + xlim(-2, 2) + ggtitle("Method 1")
+plot_kld_model_sigma_coefs(m_recall_disc_zeros) + xlim(-2, 2) + ggtitle("Method 2")
+plot_kld_model_sigma_coefs(m_recall_cont_zeros) + xlim(-2, 2) + ggtitle("Method 3")
+```
+
+Again, broadly similar estimates across models
+
+### Expected values of mean and sd by condition
+
+The previous plots show the estimates of the coefficients, which mostly gives us differences from the baseline condition (continuous + no predict), and in the case of `discrete*predict`, gives us difference from continuous + predict.
+
+However, it can be useful to look at the estimated mean (or sd) on a per-condition basis (so-called marginal estimates). We can do that by using the coefficients to construct the marginal estimate of the parameter on a per-condition basis.
+
+Again we'll make a sensible display order first:
+
+```{r}
+estimate_display_order = rev(c("continuous none", "continuous predict", "continuous rules",
+  "discrete none", "discrete predict", "discrete rules"))
+```
+
+#### Expected mu by condition
+
+```{r}
+plot_kld_model_expected_mu = function(m) {
+  expected_mu = m %>%
+    extract.samples() %>%
+    as_data_frame() %>%
+    transmute(
+      `continuous none` = mu_a,
+      `continuous predict` = mu_a + mu_bp,
+      `continuous rules` = mu_a + mu_br,
+      `discrete none` = mu_a + mu_bd,
+      `discrete predict` = mu_a + mu_bd + mu_bp + mu_bdp,
+      `discrete rules` = mu_a + mu_br + mu_bd
+    ) %>%
+    mutate(iteration = 1:n()) %>%
+    gather(condition, estimate, -iteration) %>%
+    mutate(condition = fct_relevel(condition, estimate_display_order))
+  
+  expected_mu %>% 
+    ggplot(aes(x = estimate, y = condition)) + 
+    geom_violinh(fill = "black", color = NA) + 
+    theme(axis.text=element_text(size=18), 
+    # axis.text.y=element_blank(), 
+    panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+    labs(x = "Estimated mean log(KLD)", y = "")
+}
+plot_kld_model_expected_mu(m_recall_disc) + xlim(-3,1.5) + ggtitle("KLD Method 1")
+plot_kld_model_expected_mu(m_recall_disc_zeros) + xlim(-3,1.5) + ggtitle("KLD Method 2")
+plot_kld_model_expected_mu(m_recall_cont_zeros) + xlim(-3,1.5) + ggtitle("KLD Method 3")
+```
+
+#### Expected log(sd) by condition
+
+```{r}
+plot_kld_model_expected_sigma = function(m) {
+  expected_sigma = m %>%
+    extract.samples() %>%
+    as_data_frame() %>%
+    transmute(
+      `continuous none` = sigma_a,
+      `continuous predict` = sigma_a + sigma_bp,
+      `continuous rules` = sigma_a + sigma_br,
+      `discrete none` = sigma_a + sigma_bd,
+      `discrete predict` = sigma_a + sigma_bd + sigma_bp + sigma_bdp,
+      `discrete rules` = sigma_a + sigma_br + sigma_bd
+    ) %>%
+    mutate(iteration = 1:n()) %>%
+    gather(condition, estimate, -iteration) %>%
+    mutate(condition = fct_relevel(condition, estimate_display_order))
+  
+  expected_sigma %>% 
+    ggplot(aes(x = estimate, y = condition)) + 
+    geom_violinh(fill = "black", color = NA) + 
+    theme(axis.text=element_text(size=18), 
+    # axis.text.y=element_blank(), 
+    panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+    labs(x = "Estimated log(SD) of log(KLD)", y = "")
+}
+plot_kld_model_expected_sigma(m_recall_disc) + xlim(-1, 2.5) + ggtitle("KLD Method 1")
+plot_kld_model_expected_sigma(m_recall_disc_zeros) + xlim(-1, 2.5) + ggtitle("KLD Method 2")
+plot_kld_model_expected_sigma(m_recall_cont_zeros) + xlim(-1, 2.5) + ggtitle("KLD Method 3")
+```
+
+# Transfer task analysis (KL divergence)
+
+## Set up for calculating KL
+
+### Reference distributions
+
+First, make the reference distribution we'll use to calculate KLD. Should be the predictive distribution in this case.
+
+Our true sampling distribution will be based on these parameters:
+
+```{r}
+transfer_n = 8
+transfer_true_mu = 0.75
+transfer_true_sd = 1
+transfer_true_se = transfer_true_sd / sqrt(transfer_n)
+```
+
+And participants observed a sample with these properties:
+
+```{r}
+transfer_sample_mu = 0.7
+transfer_sample_sd = 1.1
+transfer_sample_se = 1.1/sqrt(transfer_n)
+transfer_nu = transfer_n - 1      #degrees of freedom
+```
+
+Our reference distribution will be calculated over this grid:
+
+```{r}
+min_x = -2.5
+max_x = 2.5
+interval_size = 0.5
+```
+
+Here is the Leek replication prediction reference distribution:
+
+```{r}
+transfer_leek_predictive_ref_dist = make_discrete_reference_dist(
+  function(x) pnorm(x, transfer_sample_mu, transfer_sample_se*sqrt(2)), min_x, max_x, interval_size)
+transfer_leek_predictive_ref_dist
+```
+
+And a similar one, per Spence et al. (2006):
+
+```{r}
+transfer_spence_predictive_ref_dist = make_discrete_reference_dist(
+  function(x) pTF(x, transfer_sample_mu, transfer_sample_se*sqrt(2), transfer_nu), min_x, max_x, interval_size)
+transfer_spence_predictive_ref_dist
+```
+
+And a reference distribution for the observed sampling distribution:
+
+```{r}
+transfer_observed_sampling_ref_dist = make_discrete_reference_dist(
+  function(x) pnorm(x, transfer_sample_mu, transfer_sample_se), min_x, max_x, interval_size)
+transfer_observed_sampling_ref_dist
+```
+
+And one for the true sampling distribution:
+
+```{r}
+transfer_true_sampling_ref_dist = make_discrete_reference_dist(
+  function(x) pnorm(x, transfer_true_mu, transfer_true_se), min_x, max_x, interval_size)
+transfer_true_sampling_ref_dist
+```
+
+Here is a plot of all of these distributions:
+
+```{r}
+transfer_true_sampling_ref_dist %>%
+  ggplot(aes(x = x, y = p)) +
+  # predictive dist - Leek
+  stat_function(fun = function(x) dnorm(x, transfer_sample_mu, sqrt(2)*transfer_sample_se) * interval_size, 
+    color="#0066ff", linetype = "dotdash", size=1.2) +
+  # predictive dist - Spence
+  stat_function(fun = function(x) dTF(x, transfer_sample_mu, sqrt(2)*transfer_sample_se, transfer_nu) *
+      interval_size, color="purple", linetype="dashed", size=1.2) +
+  #true sampling dist
+  stat_function(fun = function(x) dnorm(x, transfer_true_mu, transfer_true_se) * interval_size, 
+    size=1.2) +
+  #observed sampling dist
+  stat_function(fun = function(x) dnorm(x, transfer_sample_mu, transfer_sample_se) * interval_size,
+    color="#ff6699", linetype = 2, size=1.2) + 
+  #observed population dist
+  stat_function(fun = function(x) dnorm(x, transfer_sample_mu, transfer_sample_sd) * interval_size, 
+    color="orange", linetype = "dotdash", size=1.2) +
+  theme(axis.text=element_text(size=18), 
+    # axis.text.y=element_blank(), 
+    panel.grid.major = element_blank(), panel.grid.minor = element_blank()) 
+```
+
+### Discrete KLD
+
+Then derive KLD for the discrete responses:
+
+```{r}
+#method 1
+df2dp$kl_disc = apply(df2dp, 1, function(row) {
+  guesses = as.numeric(strsplit(as.character(row["binprob"]), ",")[[1]])
+  kld_discrete(transfer_spence_predictive_ref_dist, guesses)
+})
+
+#method 2
+df2dp$kl_disc_zeros = apply(df2dp, 1, function(row) {
+  guesses = as.numeric(strsplit(as.character(row["binprob"]), ",")[[1]])
+  kld(transfer_spence_predictive_ref_dist$p, guesses/sum(guesses))
+})
+
+#method 3
+df2dp$kl_cont_zeros = apply(df2dp, 1, function(row) {
+  guesses = as.numeric(strsplit(as.character(row["binprob"]), ",")[[1]])
+  kld(dnorm(transfer_spence_predictive_ref_dist$x, transfer_true_mu, transfer_true_se), guesses/sum(guesses))
+})
+
+#method 1 for true sampling dist
+df2dp$true_sampling_kl = apply(df2dp, 1, function(row) {
+  guesses = as.numeric(strsplit(as.character(row["binprob"]), ",")[[1]])
+  kld_discrete(transfer_true_sampling_ref_dist, guesses)
+})
+
+#method 1 for observed sampling dist
+df2dp$observed_sampling_kl = apply(df2dp, 1, function(row) {
+  guesses = as.numeric(strsplit(as.character(row["binprob"]), ",")[[1]])
+  kld_discrete(transfer_observed_sampling_ref_dist, guesses)
+})
+```
+
+#### Comparing the methods
+
+```{r}
+df2dp %>%
+  ggplot(aes(x = log(kl_disc), y = log(kl_disc_zeros))) +
+  geom_point(position=position_jitter(width=.01, height=.01), alpha=.1, pch=19, size=2) +
+  geom_abline(intercept = 0, slope = 1) +
+  facet_wrap(~ condition)
+```
+
+Again, we're seeing some systematic differences, but nothing large relative to the bias, and nothing that varies by condition.
+
+```{r}
+df2dp %>%
+  ggplot(aes(x = log(kl_disc), y = log(kl_cont_zeros))) +
+  geom_point(position=position_jitter(width=.01, height=.01), alpha=.1, pch=19, size=2) +
+  geom_abline(intercept = 0, slope = 1) +
+  facet_wrap(~ condition)
+```
+
+### Continuous KLD
+
+And for the continuous responses:
+
+```{r}
+# method 1
+df2cp$kl_disc = apply(df2cp, 1, function(row) {
+  guessed_y = as.numeric(strsplit(as.character(row["binprob"]), ",")[[1]])
+  guessed_x = as.numeric(strsplit(as.character(row["binx"]), "_")[[1]])
+  kld_continuous(transfer_spence_predictive_ref_dist, guessed_x, guessed_y)
+})
+
+# method 2 / 3
+df2cp$kl_cont_zeros = apply(df2cp, 1, function(row) {
+  guessed_y = as.numeric(strsplit(as.character(row["binprob"]), ",")[[1]])
+  guessed_x = as.numeric(strsplit(as.character(row["binx"]), "_")[[1]])
+  kld(dnorm(guessed_x, transfer_true_mu, transfer_true_se), guessed_y/sum(guessed_y))
+})
+df2cp$kl_disc_zeros = df2cp$kl_cont_zeros
+
+# method 1 for true sampling dist
+df2cp$true_sampling_kl = apply(df2cp, 1, function(row) {
+  guessed_y = as.numeric(strsplit(as.character(row["binprob"]), ",")[[1]])
+  guessed_x = as.numeric(strsplit(as.character(row["binx"]), "_")[[1]])
+  kld_continuous(transfer_true_sampling_ref_dist, guessed_x, guessed_y)
+})
+
+# method 1 for true sampling dist
+df2cp$observed_sampling_kl = apply(df2cp, 1, function(row) {
+  guessed_y = as.numeric(strsplit(as.character(row["binprob"]), ",")[[1]])
+  guessed_x = as.numeric(strsplit(as.character(row["binx"]), "_")[[1]])
+  kld_continuous(transfer_observed_sampling_ref_dist, guessed_x, guessed_y)
+})
+```
+
+#### Comparing the methods
+
+```{r}
+df2cp %>%
+  ggplot(aes(x = log(kl_disc), y = log(kl_disc_zeros))) +
+  geom_point(position=position_jitter(width=.01, height=.01), alpha=.1, pch=19, size=2) +
+  geom_abline(intercept = 0, slope = 1) +
+  facet_wrap(~ condition)
+```
+
+```{r}
+df2cp %>%
+  ggplot(aes(x = log(kl_disc), y = log(kl_cont_zeros))) +
+  geom_point(position=position_jitter(width=.01, height=.01), alpha=.1, pch=19, size=2) +
+  geom_abline(intercept = 0, slope = 1) +
+  facet_wrap(~ condition)
+```
+
+## Combine the discrete and continuous
+
+Then combine the discrete and continuous and add prescore:
+
+```{r}
+adfp <- rbind(df2dp, df2cp)
+
+adfp = merge(adfp, worker_prescore, by = intersect(names(adfp), names(worker_prescore)))
+```
+
+## Descriptive statistics
+
+```{r}
+adfp %<>% mutate(
+  discrete = ifelse(condition == "d_p" | condition == "d_np" | condition == "r_np", 1, 0),
+  predict = ifelse(condition == "d_p" | condition == "c_p", 1, 0),
+  rules = ifelse(condition == "rd_np" | condition == "rc_np", 1, 0)
+)
+```
+
+Log of KLD across conditions:
+
+```{r}
+adfp %>%
+  mutate(condition = reorder(condition, log(kl_disc))) %>%
+  ggplot(aes(x = condition, y = log(kl_disc))) +
+  geom_violin(fill = "gray75") + 
+  geom_boxplot(width = 0.1, color = "red", outlier.color = NA) +
+  geom_jitter(pch=20, width = .2)
+```
+
+
+```{r}
+ddply(adfp, ~condition, summarise, 
+  mean=mean(merrs, na.rm=TRUE), sd=sd(merrs, na.rm=TRUE),
+  median = median(merrs, na.rm=TRUE),
+  mad = mad(merrs, na.rm=TRUE))
+
+ddply(adfp, ~condition, summarise, 
+  mean=mean(serrs, na.rm=TRUE), sd=sd(serrs, na.rm=TRUE),
+  median = median(serrs, na.rm=TRUE),
+  mad = mad(serrs, na.rm=TRUE))
+
+#plots
+
+adfp %>%
+ggplot(aes(x = means - 0.7)) + stat_density() +
+    facet_wrap(~condition) +
+    geom_vline(xintercept = 0, color="blue") + theme(axis.text.y=element_blank(),axis.ticks.y=element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + labs(x="Predicted Mean - Reference Mean",  y="") + geom_vline(xintercept = 0.05, color="black")
+
+
+adfp %>%
+ggplot(aes(x = sds - sqrt(2)*(1.1/sqrt(8)))) + stat_density() +
+    facet_wrap(~condition) +
+    geom_vline(xintercept = 0, color="blue") + theme(axis.text.y=element_blank(),axis.ticks.y=element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + labs(x="Predicted SD - Reference SD",  y="") + geom_vline(xintercept = -0.20, color="black") + geom_vline(xintercept=0.55, color="orange")
+
+```
+
+## Frequentist model
+
+```{r}
+#center prescore
+adfp$prescore_c <- adfp$prescore - mean(adfp$prescore)
+
+adfp_gamlss = adfp %>%
+  dplyr::select(discrete, predict, rules, prescore_c, kl_disc, kl_disc_zeros, kl_cont_zeros, workerId) #gamlss needs all columns without NAs
+
+mg = gamlss(log(kl_disc) ~ discrete*predict + rules+prescore_c, 
+  sigma.formula = ~ discrete*predict + rules+prescore_c,
+  data=adfp_gamlss)
+
+summary(mg)
+```
+
+## Bayesian model
+
+We will re-use the same model specification as in the recall task, but now for the transfer task:
+
+```{r}
+m_transfer_disc = map2stan(kld_model_spec, data = adfp_gamlss %>% rename(kl = kl_disc))
+m_transfer_disc_zeros = map2stan(kld_model_spec, data = adfp_gamlss %>% rename(kl = kl_disc_zeros))
+m_transfer_cont_zeros = map2stan(kld_model_spec, data = adfp_gamlss %>% rename(kl = kl_cont_zeros))
+```
+
+### Coefficients of mean log(KLD)
+
+First we'll derive the coefficients for mu (the mean of log(KLD)). 
+
+We'll extract samples of the coefficients from the model and display them as raindrop plots, using the same display order as for the recall task:
+
+```{r}
+plot_kld_model_mu_coefs(m_transfer_disc) + xlim(-1.5, 1.5) + ggtitle("Method 1")
+plot_kld_model_mu_coefs(m_transfer_disc_zeros) + xlim(-1.5, 1.5) + ggtitle("Method 2")
+plot_kld_model_mu_coefs(m_transfer_cont_zeros) + xlim(-1.5, 1.5) + ggtitle("Method 3")
+```
+
+Main difference here is only in the intercept, which reflects the fact that there is a systematic difference in KLD depending on method, but not one that changes the relative differences between conditions substantially.
+
+### Coefficients of log(sd) of log(kld)
+
+```{r}
+plot_kld_model_sigma_coefs(m_transfer_disc) + xlim(-1.5, 1.5) + ggtitle("Method 1")
+plot_kld_model_sigma_coefs(m_transfer_disc_zeros) + xlim(-1.5, 1.5) + ggtitle("Method 2")
+plot_kld_model_sigma_coefs(m_transfer_cont_zeros) + xlim(-1.5, 1.5) + ggtitle("Method 3")
+```
+
+### Expected values of mean and sd by condition
+
+The previous plots show the estimates of the coefficients, which mostly gives us differences from the baseline condition (continuous + no predict), and in the case of `discrete*predict`, gives us difference from continuous + predict.
+
+As in the recall task, we will also look at the estimated mean (or sd) on a per-condition basis (so-called marginal estimates).
+
+#### Expected mu by condition
+
+```{r}
+plot_kld_model_expected_mu(m_transfer_disc) + xlim(-2, 1) + ggtitle("Method 1")
+plot_kld_model_expected_mu(m_transfer_disc_zeros) + xlim(-1.5, 1) + ggtitle("Method 2")
+plot_kld_model_expected_mu(m_transfer_cont_zeros) + xlim(-1.5, 1) + ggtitle("Method 3")
+```
+
+#### Expected log(sd) by condition
+
+```{r}
+plot_kld_model_expected_sigma(m_transfer_disc) + xlim(-1, 1.5) + ggtitle("Method 1")
+plot_kld_model_expected_sigma(m_transfer_disc_zeros) + xlim(-1, 1.5) + ggtitle("Method 2")
+plot_kld_model_expected_sigma(m_transfer_cont_zeros) + xlim(-1, 1.5) + ggtitle("Method 3")
+```
+
+
+
+```{r}
+#for comparing population sampling dist and observed sampling dist to see if some participants are confused by the difference
+adfp_gamlssp = adfp %>%
+  dplyr::select(discrete, predict, rules, prescore, true_sampling_kl) #gamlss needs all columns without NAs
+mg = gamlss(log(true_sampling_kl) ~ discrete*predict + rules+prescore, 
+  sigma.formula = ~ discrete*predict + rules+prescore,
+  data=adfp_gamlssp)
+summary(mg)
+```
+
+#Analyze responses to text probability questions
+#What is overall error like? What about for specific questions?
+
+```{r}
+#Overall
+ddply(adsL,~tasktype,summarise,mean=mean(erra, na.rm=TRUE),sd=sd(erra, na.rm=TRUE))
+
+ggplot(adsL, aes(x=reorder(tasktype, erra, FUN=median), erra)) + geom_boxplot() + geom_jitter() + facet_wrap( ~ q_num) #useless chart
+```
+
+```{r}
+#Linear mixed effects model -- first in lme4
+full.model <- lmer(erra  ~ discrete + predict + prescore + discrete*predict + rules + (1+prescore| workerId) + (1+prescore| q_num), data=adsL)
+summary(full.model)
+```
+
+```{r}
+coefs <- data.frame(coef(summary(full.model)))
+# use normal distribution to approximate p-value
+coefs$p.z <- 2 * (1 - pnorm(abs(coefs$t.value)))
+coefs
+```
+
+#Now in stan (via brms)
+
+```{r}
+myvars <- c("q_num", "workerId", "erra", "discrete", "predict", "rules", "prescore")
+adsL_stan <- adsL[myvars]
+
+m1_g2s <- brm(erra ~ discrete + predict + discrete*predict + rules + prescore + (1 | workerId) + (1 | q_num), data = adsL_stan)
+```
+
+
+```{r}
+m1_g2s
+```
+
+Plotting the coefficients with 80 and 95% intervals. Note: Some readers may experience an error in generating the plot due to a known bug with plotting rstan model fits when using using some versions of ggplot2. (https://github.com/tidyverse/ggplot2/blob/master/revdep/problems.md) 
+
+```{r}
+stanplot(m1_g2s)
+```
+
+```{r}
+#posterior distributions for coefficients
+coef_continuous = posterior_samples(m1_g2s) %$% {b_Intercept}
+coef_discrete = posterior_samples(m1_g2s) %$% {b_discrete}
+coef_predict = posterior_samples(m1_g2s) %$% {b_predict} 
+coef_discrete_predict = posterior_samples(m1_g2s) %$% {`b_discrete:predict`}
+coef_rules = posterior_samples(m1_g2s) %$% {b_rules}
+coef_prescore = posterior_samples(m1_g2s) %$% {b_prescore}
+
+violin <- data.frame(cbind(coef_continuous,coef_predict,coef_discrete,coef_discrete_predict,coef_rules,coef_prescore))
+violin <- reshape(varying = c("coef_continuous","coef_predict","coef_discrete","coef_discrete_predict","coef_rules","coef_prescore"), v.names = "estimate",  timevar="condition", times=c("coef_continuous","coef_predict","coef_discrete","coef_discrete_predict","coef_rules","coef_prescore"), direction = "long", data=violin)
+violin$condition <- ifelse(violin$condition=="coef_continuous", "intercept", ifelse(violin$condition=="coef_rules", "rules", ifelse(violin$condition=="coef_predict", "predict", ifelse(violin$condition=="coef_discrete_predict", "discrete*predict", ifelse(violin$condition=="coef_discrete", "discrete", "prescore")))))
+```
+
+```{r}
+ggplot() + geom_violin(data=violin, mapping=aes(x=condition, estimate),fill="black") + coord_flip() + geom_hline(aes(yintercept=0, colour="red"))+ guides(color=FALSE) + labs(y="Estimate", x="")
+```
+
+```{r}
+#posterior distributions for conditions
+beta_continuous_posterior = posterior_samples(m1_g2s) %$% {b_Intercept}
+beta_discrete_posterior = posterior_samples(m1_g2s) %$% {b_Intercept + b_discrete}
+beta_predict_posterior = posterior_samples(m1_g2s) %$% {b_Intercept + b_predict} 
+beta_discrete_predict_posterior = posterior_samples(m1_g2s) %$% {b_Intercept + b_discrete + b_predict + `b_discrete:predict`}
+beta_rules_posterior = posterior_samples(m1_g2s) %$% {b_Intercept + b_rules}
+beta_discrete_rules_posterior = posterior_samples(m1_g2s) %$% {b_Intercept + b_rules + b_discrete}
+
+violin <- data.frame(cbind(beta_continuous_posterior,beta_predict_posterior,beta_discrete_posterior,beta_discrete_predict_posterior,beta_rules_posterior,beta_discrete_rules_posterior))
+violin <- reshape(varying = c("beta_continuous_posterior","beta_predict_posterior","beta_discrete_posterior","beta_discrete_predict_posterior","beta_rules_posterior","beta_discrete_rules_posterior"), v.names = "estimate",  timevar="condition", times=c("beta_continuous_posterior","beta_predict_posterior","beta_discrete_posterior","beta_discrete_predict_posterior","beta_rules_posterior","beta_discrete_rules_posterior"), direction = "long", data=violin)
+violin$condition <- ifelse(violin$condition=="beta_continuous_posterior", "continuous none", ifelse(violin$condition=="beta_rules_posterior", "continuous rules", ifelse(violin$condition=="beta_predict_posterior", "continuous predict", ifelse(violin$condition=="beta_discrete_predict_posterior", "discrete predict", ifelse(violin$condition=="beta_discrete_rules_posterior", "discrete rules", "discrete none")))))
+
+ggplot() + geom_violin(data=violin, mapping=aes(x=condition, estimate),fill="black") + coord_flip() + guides(color=FALSE) + labs(y="Estimate", x="")
+```
+

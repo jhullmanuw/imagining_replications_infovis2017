@@ -1,0 +1,450 @@
+---
+title: "Preliminary study (interface selection) analysis"
+output: 
+  html_document:
+    toc: true
+---
+
+# Set up
+
+## How to compile this file
+
+We recommend loading this repository as a new project in RStudio (File -> New Project -> Existing directory and choosing `[your-path]/supplemental_material/`). Then, you can run code chunks individually or "Knit" the entire markdown file. RStudio should handle working directories for you.
+
+If you choose to compile the file manually, make sure te Rmd working directory is same directory that contains this file (use 'getwd()'). The path should look like `[your-path]/supplemental_material/Main_Study_Analysis/`. Use 'setwd()' if not.
+
+## Libraries required for this analysis
+
+Some of the libraries below require particular installation instructions (rstan). See comments in the code chunk below.
+
+The `import` library is also required to run this code, which can be installed via `install.packages("import")`.
+
+```{r setup, results="hide", message=FALSE}
+library(dplyr)
+import::from(plyr, ddply, rename)
+library(magrittr)   #pipe syntax (%>%, %<>%, etc)
+library(ggplot2)
+library(lme4)
+library(forcats)
+library(tidyr)
+import::from(gamlss.dist, dTF, qTF, pTF, rTF)   #the TF functions are a scaled and shifted t distribution
+import::from(LaplacesDemon, KLD)
+import::from(MASS, parcoord)
+
+# for RStan installation instructions, see https://github.com/stan-dev/rstan/wiki/RStan-Getting-Started
+# DO NOT attempt to install rstan using install.packages(), as it will likely fail. Unfortunately its
+# installation is finicky, and we recommend following the instructions on that page to the letter.
+library(rstan)
+
+library(brms)
+```
+
+## Ggplot theme + stan options
+
+```{r}
+theme_set(theme_bw())
+options(mc.cores = parallel::detectCores())
+```
+
+# Create (discretized) reference distribution
+Create a discretized normal distribution for a fixed interval size to represent the reference distribution shown to participants. 
+
+```{r}
+mu = 10
+sd = 2
+
+min_x = 0
+max_x = 20
+interval_size = 2
+
+#derive discrete reference distribution
+make_discrete_reference_dist = function(dist_fun, min_x, max_x, interval_size) {
+  data_frame(
+    x_min = seq(min_x, max_x - interval_size, by = interval_size),
+    x_max = seq(min_x + interval_size, max_x, by = interval_size),
+    x = (x_min + x_max)/2,   #midpoint of the interval
+    #this difference sometimes comes out as 0 due to rounding errors in bins with very low probability
+    #adjust it to always be at least epsilon (smallest value > 0 on this machine
+    #such that x + eps != x is always true).
+    p = pmax(.Machine$double.eps, dist_fun(x_max) - dist_fun(x_min))
+  )
+}
+
+#derive discrete analog
+correct_dist = make_discrete_reference_dist(function(x) pnorm(x, mu, sd), min_x, max_x, interval_size)
+  #remember to change to interval_size=1 for 100 balls
+
+#check what it looks like:
+correct_dist %>%
+    ggplot(aes(x = x, y = p)) +
+    stat_function(fun = function(x) dnorm(x, mu, sd) * interval_size) +
+    geom_segment(aes(xend = x, y = 0, yend = p), size = 2)
+
+```
+
+#Read in data
+
+##HCI listserv participants
+```{r}
+df <- read.csv("anonymized_survey_response_dists_with_order_forR_infovis.txt", sep="\t", row.names=NULL) 
+```
+
+##Turk participants
+```{r}
+df2 <- read.csv("anonymized_survey_turk_response_dists_with_order_forR_infovis.txt", sep="\t", row.names=NULL) 
+colnames(df)
+```
+
+# KL divergence
+Since the code for KL divergence requires n_balls and interval size, split up the data into 3 dataframes, one for n=20, one for n=50, one for n=100
+
+```{r}
+df20 <- subset(df, df$nballs=="20") 
+df50 = subset(df, df$nballs=="50") 
+df100 = subset(df, df$nballs=="100") 
+
+df220 <- subset(df2, df2$nballs=="20") 
+df250 = subset(df2, df2$nballs=="50") 
+df2100 = subset(df2, df2$nballs=="100") 
+```
+
+##Discrete interfaces
+###Create reference distribution for 20 and 50 outcome interfaces
+
+```{r}
+#for 20 and 50 circles
+correct_dist = make_discrete_reference_dist(function(x) pnorm(x, mu, sd), min_x, max_x, interval_size)
+```
+
+###Function to calculate KL divergence 
+```{r}
+#function to calculate
+kld_discrete = function(reference_dist, guesses) {
+  #responses with 20 balls appear to be recorded as being out of 100, so
+  #instead of assuming some number here we'll just make this out of the
+  #total of the supplied guesses 
+  guesses = guesses / sum(guesses) 
+  smoothing_denominator = 1000
+  n_atoms = nrow(correct_dist)
+  #make sure the number of supplied guesses is the same as the atoms in the reference dist
+  stopifnot(n_atoms == length(guesses))
+  #calculate smoothed guesses (guaranteed to have no 0s and sum to 1)
+  estimated_p = (guesses * smoothing_denominator + 1) / (smoothing_denominator + n_atoms)
+  #assert we have normalized everything correctly (within a reasonable tolerance)
+ # stopifnot(isTRUE(all.equal(sum(reference_dist$p), 1, tolerance = 0.00001)))
+#  stopifnot(isTRUE(all.equal(sum(estimated_p), 1, tolerance = 0.00001)))
+  #since we have normalized everything correctly, we can use the KLD formula directly
+  #instead of calling KLD (which renormalizes again)
+  sum(reference_dist$p * (log(reference_dist$p) - log(estimated_p)))
+}
+```
+
+###Calculate KL divergence for 20 and 50 outcome discrete interfaces 
+```{r}
+
+#Note that we must convert binprob, which loosk like 0,0,5,15,30,30,15,5,0,0, into a vector for each data set
+
+#HCI listserv participants (df)
+df20$kl = apply(df20, 1, function(row) {
+  guesses = as.numeric(strsplit(as.character(row["binprob"]), ",")[[1]])
+  kld_discrete(correct_dist, guesses)
+})
+
+df50$kl = apply(df50, 1, function(row) {
+  guesses = as.numeric(strsplit(as.character(row["binprob"]), ",")[[1]])
+  kld_discrete(correct_dist, guesses)
+})
+
+#MTurk participants (df2)
+df220$kl = apply(df220, 1, function(row) {
+  guesses = as.numeric(strsplit(as.character(row["binprob"]), ",")[[1]])
+  kld_discrete(correct_dist, guesses)
+})
+
+df250$kl = apply(df250, 1, function(row) {
+  guesses = as.numeric(strsplit(as.character(row["binprob"]), ",")[[1]])
+  kld_discrete(correct_dist, guesses)
+})
+
+```
+
+###Calculate KL divergence for 100 outcome discrete interfaces 
+
+```{r}
+#Change interval size and recreate reference distribution
+interval_size = 1
+correct_dist = make_discrete_reference_dist(function(x) pnorm(x, mu, sd), min_x, max_x, interval_size)
+
+df100$kl = apply(df100, 1, function(row) {
+  guesses = as.numeric(strsplit(as.character(row["binprob"]), ",")[[1]])
+  kld_discrete(correct_dist, guesses)
+})
+
+df2100$kl = apply(df2100, 1, function(row) {
+  guesses = as.numeric(strsplit(as.character(row["binprob"]), ",")[[1]])
+  kld_discrete(correct_dist, guesses)
+})
+```
+
+##Continuous interfaces
+###Create reference distribution 
+
+```{r}
+min_x = 0
+max_x = 20
+mu = 10
+sd = 2
+
+interval_size = 2
+correct_dist = make_discrete_reference_dist(function(x) pnorm(x, mu, sd), min_x, max_x, interval_size)
+
+```
+
+###Function to calculate KL divergence 
+```{r}
+y_to_density = function(x, estimated_y) {
+    user_density = approxfun(x, estimated_y)
+    area_under_curve = integrate(user_density, lower = min(x), upper = max(x))$value
+    #finally, a similar smoothing as applied in the discrete case to ensure there are no 0s
+    #see kl-divergence-for-discrete-dist.Rmd
+    #might want to revisit this smoothing in the other files and make them all exactly the same?
+    #(i.e. here we assume fractions out of 1000, while in the other file we used 100 and 20 depending
+    #on number of balls --- but this could make the KLD higher for those conditions just because of
+    #differences in smoothing parameters)
+    (estimated_y / area_under_curve * 1000 + 1) / (1000 + length(x))
+}
+
+
+```
+
+###Calculate KL divergence for continuous interfaces 
+```{r}
+
+#Divide data in HCI listserv and MTurk participants
+dfc=subset(df, df$condition == "drawcontline" | df$condition=="drawcontfill") 
+dfc2=subset(df2, df2$condition == "drawcontline" | df2$condition=="drawcontfill") 
+
+klsc <- vector()
+for(i in 1:length(dfc$binprob)){
+  estimated_y = strsplit(as.character(dfc$binprob[i]), ",") 
+  estimated_y = as.numeric(estimated_y[[1]])
+  #interval_size = 1
+  guesses = correct_dist %>%
+    mutate(
+        estimated_p = y_to_density(c(2,4,6,8,10,12,14,16,18,20), estimated_y)
+    )
+   klsc = append(klsc, guesses %$% KLD(pnorm(x + interval_size/2, mu, sd) - pnorm(x - interval_size/2, mu, sd), estimated_p)$sum.KLD.px.py)
+}
+dfc = cbind(dfc, klsc)
+
+#MTurk participants
+klsc <- vector()
+for(i in 1:length(dfc2$binprob)){
+  estimated_y = strsplit(as.character(dfc2$binprob[i]), ",") 
+  estimated_y = as.numeric(estimated_y[[1]])
+  guesses = correct_dist %>%
+    mutate(
+        estimated_p = y_to_density(c(2,4,6,8,10,12,14,16,18,20), estimated_y)
+    )
+   klsc = append(klsc, guesses %$% KLD(pnorm(x + interval_size/2, mu, sd) - pnorm(x - interval_size/2, mu, sd), estimated_p)$sum.KLD.px.py)
+}
+dfc2 = cbind(dfc2, klsc)
+```
+
+#Descriptive Statistics
+
+##Time and slider 
+
+```{r}
+#time by sample
+ddply(df, ~condition, summarise, mean=mean(time, na.rm=TRUE), sd=sd(time, na.rm=TRUE))
+
+ddply(df2, ~condition, summarise, mean=mean(time, na.rm=TRUE), sd=sd(time, na.rm=TRUE))
+
+
+#slider by sample 
+#first transform to numeric
+
+df2$slider <- as.numeric(paste(df2$slider))
+
+ddply(df, ~condition, summarise, mean=mean(slider, na.rm=TRUE), sd=sd(slider, na.rm=TRUE))
+
+ddply(df2, ~condition, summarise, mean=mean(slider, na.rm=TRUE), sd=sd(slider, na.rm=TRUE))
+```
+
+
+##KL Divergence prep 
+
+###Combine samples and record sample type 
+
+```{r}
+dfc = rename(dfc, c("klsc"="kl"))
+dfc2 = rename(dfc2, c("klsc"="kl"))
+
+adf <- rbind(df20, df50, df100, dfc)
+#below line is doing something weird
+adf2 <- rbind(df220, df250, df2100, dfc2)
+#get rid of erroneous extra emails that create unnecessary levels
+adf2 <- droplevels(adf2)
+
+adf$pop = "Univ"
+adf2$pop = "Turk"
+
+adfA = rbind(adf, adf2) 
+#adfA$cond_type <- ifelse(adfA$condition=="addclick20" | adfA$condition=="addclick50", "balls_bins", ifelse(adfA$condition=="pullup20" | adfA$condition=="pullup100", "pullup", ifelse(adfA$condition=="roll20" | adfA$condition=="roll100", "roll", ifelse(adfA$condition=="paintdrag20" | adfA$condition=="paintdrag100", "paintdrag", ifelse(adfA$condition=="paintdragtop20" | adfA$condition=="paintdragtop100", "paintdragtop", "continuous"))))) 
+
+```
+
+##KL divergence 
+```{r}
+#take the log
+adf$logkl <- log(adf$kl)
+
+ddply(adf, ~condition, summarise, mean=mean(logkl, na.rm=TRUE), sd=sd(kl, na.rm=TRUE))
+
+```
+
+# Modeling
+
+## Prepare data for mixed effects model 
+
+```{r}
+adfA %<>% mutate(
+  # move addlcick50 to the front to make it the intercept in the dummy-coded model
+  condition = fct_relevel(condition, "addclick50"),
+  pop = factor(pop),
+  slider = as.numeric(slider),
+  subject = factor(email),
+  mturk = pop != "Univ"
+)
+```
+
+##KL divergence
+###Frequentist model
+
+```{r}
+kl_lme4 <- lmer( log(kl) ~ condition + mturk + (1 | subject), data = adfA)
+```
+
+```{r}
+summary(kl_lme4)
+```
+
+###Bayesian model
+
+```{r}
+kl_g2s <- brm(log(kl) ~ condition + order + mturk + (1 | subject), data = adfA)
+```
+
+```{r}
+kl_g2s
+```
+
+Plotting the coefficients with 80 and 95% intervals. 
+
+Note: Some readers may experience an error in generating the plot due to a known bug with plotting rstan model fits when using using some versions of ggplot2. (https://github.com/tidyverse/ggplot2/blob/master/revdep/problems.md) 
+
+```{r}
+stanplot(kl_g2s)
+```
+
+
+####Expected values of mean by condition
+
+```{r}
+adfA %>%
+  expand(condition, order = 1, mturk = FALSE) %>%
+  cbind(fitted(kl_g2s, newdata = ., re_formula = NA))
+```
+
+####To compare university and MTurk samples 
+
+Extract coef for difference in Univ vs mturk:
+
+```{r}
+fixef(kl_g2s)["mturkTRUE",]
+```
+
+## Time
+
+###Frequentist model
+```{r}
+time_lme4 <- lmer( time ~ condition + mturk + (1 | subject) , data=adfA )
+summary(time_lme4)
+```
+ 
+###Bayesian model
+```{r}
+time_g2s <- brm(time ~ condition + order + mturk + (1 | subject), data = adfA)
+```
+
+```{r}
+time_g2s
+```
+
+Plot coefficients (again, known error with some ggplot2 versions may cause issues for some readers)
+
+```{r}
+stanplot(time_g2s)
+```
+
+
+#### Expected values of mean by condition
+
+```{r}
+adfA %>%
+  expand(condition, order = 1, mturk = FALSE) %>%
+  cbind(fitted(time_g2s, newdata = ., re_formula = NA))
+```
+
+####To compare university and MTurk samples 
+
+Extract coef for difference in Univ vs mturk:
+
+```{r}
+fixef(time_g2s)["mturkTRUE",]
+```
+
+##Slider
+
+###Frequentist model
+```{r}
+slider_lme4 <- lmer(slider ~ condition + mturk + (1 | subject) , data=adfA)
+```
+
+```{r}
+summary(slider_lme4)
+```
+ 
+###Bayesian model
+
+```{r}
+slider_g2s <- brm(slider ~ condition + order + mturk + (1 | subject) , data = adfA)
+```
+
+```{r}
+slider_g2s
+```
+
+plot coefficients (again, known error with some ggplot2 versions may cause issues for some readers)
+
+```{r}
+stanplot(slider_g2s)
+```
+
+#### Expected values of mean by condition
+
+```{r}
+adfA %>%
+  expand(condition, order = 1, mturk = FALSE) %>%
+  cbind(fitted(slider_g2s, newdata = ., re_formula = NA))
+```
+
+
+####To compare university and MTurk samples 
+
+Extract coef for difference in Univ vs mturk:
+
+```{r}
+fixef(slider_g2s)["mturkTRUE",]
+```

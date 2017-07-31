@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<head>
+    
+    
+                                              
+        <meta charset="utf-8">
+        <meta http-equiv="X-UA-Compatible" content="IE=edge">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+    
+         
+
+          <link rel="stylesheet" href="//code.jquery.com/ui/1.12.0/themes/base/jquery-ui.css">
+          
+          <script src="https://code.jquery.com/jquery-1.12.4.js"></script>
+          <script src="https://code.jquery.com/ui/1.12.0/jquery-ui.js"></script>
+         
+
+    
+        <!-- font -->
+        <link href='https://fonts.googleapis.com/css?family=Raleway:400,100,100italic,200,200italic,300,300italic,400italic,500,500italic,600,600italic,700,700italic,800,800italic,900,900italic' rel='stylesheet' type='text/css'>
+        <link href='https://fonts.googleapis.com/css?family=Open+Sans:400,300italic,300,400italic,600,600italic,700,700italic,800,800italic' rel='stylesheet' type='text/css'>
+    
+    
+        <link href='https://fonts.googleapis.com/css?family=Carrois+Gothic+SC' rel='stylesheet' type='text/css'>
+
+
+        <title>Graphical Prediction</title>
+        <!-- css -->
+        <link rel="stylesheet" href="style.css">
+        <link rel="stylesheet" href="ev-style.css">
+        <!-- js -->
+        <script src="https://code.jquery.com/jquery-2.1.1.js"></script>
+        <script src="https://code.jquery.com/ui/1.11.1/jquery-ui.js"></script>
+        
+
+                                      
+                                      
+        <script type="text/javascript">
+            $(document).ready(function() {
+                $('#ballN').text(25 - $('.activeCircle').size())
+            })
+        </script>
+
+
+
+
+
+</head>
+
+<body>
+    
+  <form id="myForm" action="<?php echo $formAction; ?>" method="POST">
+    <div id="mainContainer">
+        <div id="main">
+                <br>
+            <div id = "header"><h2>Graphical Prediction Interfaces</h2> 
+                </div>
+
+                <div class="controlP" id="colFirst">
+                    <div class="colInner" id="feedback">
+                      <b><p>Interface options</p></b>
+                      
+                  </div>
+                </div>
+
+                
+                <div id="canvasDrawing">
+                    <div id="canvasDrawingInner">
+                    <div id="drawArea">
+                        <div id="feedbackPanel"><img src="normalDist.png"><div id="instruction"></div><center><div id="availableBall">You have <span id="ballN"></span> balls left.</div> <div id="feedbackmsg"></center> <button type="reset" class="btn btn-danger" id="clear">Clear Drawing</button> </div>
+                           <div id="console"></div>
+                      <svg></svg>
+                </div>     
+                    </div>
+                        </div>
+                 
+                    
+                     </div>
+            </div>
+        
+
+                
+               
+    </div>
+
+
+    <script src="https://d3js.org/d3.v3.min.js" charset="utf-8"></script>
+
+    
+    
+
+  <script src="https://cdn.jsdelivr.net/lodash/4.11.2/lodash.js"></script>
+  <script src="./line_ev.js"></script>
+<script src="./index.js"></script>
+    
+
+</form>
+</body>
